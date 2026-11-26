@@ -25,7 +25,7 @@ static long checks = 0;
     do {                                                                     \
         checks++;                                                            \
         if (!(cond)) {                                                       \
-            fprintf(stderr, "失败 %s:%d: %s\n", __FILE__, __LINE__, #cond);  \
+            fprintf(stderr, "FAILED %s:%d: %s\n", __FILE__, __LINE__, #cond);\
             exit(1);                                                         \
         }                                                                    \
     } while (0)
@@ -576,8 +576,8 @@ static void test_random_games(void)
             }
         }
     }
-    printf("随机对拍 %d 局；半径 %d 的最长对局 %d 步（上限 %d）\n", games,
-           HR_MAX_RADIUS, longest, HR_MAX_PLIES);
+    printf("%d random games; longest at radius %d: %d moves (limit %d)\n",
+           games, HR_MAX_RADIUS, longest, HR_MAX_PLIES);
 }
 
 /**
@@ -595,7 +595,7 @@ int main(void)
     test_end_by_sweep();
     test_history_and_buffers();
     test_random_games();
-    printf("全部通过（%ld 项检查），sizeof(hr_game) = %zu 字节\n", checks,
-           sizeof(hr_game));
+    printf("All tests passed (%ld checks), sizeof(hr_game) = %zu bytes\n",
+           checks, sizeof(hr_game));
     return 0;
 }

@@ -422,15 +422,15 @@ hr_coord hr_step(hr_coord at, hr_dir dir)
 const char *hr_status_str(hr_status status)
 {
     switch (status) {
-    case HR_OK:                   return "成功";
-    case HR_ERR_ARG:              return "参数无效";
-    case HR_ERR_GAME_OVER:        return "对局已结束";
-    case HR_ERR_BAD_MOVE:         return "操作类型或方向无效";
-    case HR_ERR_OFF_BOARD:        return "坐标在棋盘外";
-    case HR_ERR_NOT_EMPTY:        return "落子点不是空格";
-    case HR_ERR_NO_PIECE_IN_HAND: return "手中没有棋子";
-    case HR_ERR_NOT_OWN_PIECE:    return "该格没有行动方的棋子";
-    case HR_ERR_NO_HISTORY:       return "没有可撤销的操作";
+    case HR_OK:                   return "success";
+    case HR_ERR_ARG:              return "invalid argument";
+    case HR_ERR_GAME_OVER:        return "the game is already over";
+    case HR_ERR_BAD_MOVE:         return "invalid move type or direction";
+    case HR_ERR_OFF_BOARD:        return "coordinates are off the board";
+    case HR_ERR_NOT_EMPTY:        return "target cell is not empty";
+    case HR_ERR_NO_PIECE_IN_HAND: return "no piece in hand";
+    case HR_ERR_NOT_OWN_PIECE:    return "no piece of the mover on that cell";
+    case HR_ERR_NO_HISTORY:       return "no move to undo";
     }
-    return "未知错误";
+    return "unknown error";
 }

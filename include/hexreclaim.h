@@ -494,7 +494,7 @@ hr_coord hr_step(hr_coord at, hr_dir dir);
  * @brief Describes a status code.
  *
  * @param status Status code.
- * @return A UTF-8 description in Chinese; never NULL.
+ * @return A description in English; never NULL.
  */
 const char *hr_status_str(hr_status status);
 

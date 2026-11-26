@@ -55,8 +55,9 @@ static void print_state(const hr_game *g)
     }
     for (int p = HR_P0; p <= HR_P1; p++) {
         hr_player who = (hr_player)p;
-        printf("P%d(%c/%c)  手中 %d  已占 %d  锁定 %d\n", p, "ab"[p], "AB"[p],
-               hr_in_hand(g, who), hr_claimed(g, who), hr_score(g, who));
+        printf("P%d(%c/%c)  in hand %d  claimed %d  locked %d\n", p,
+               "ab"[p], "AB"[p], hr_in_hand(g, who), hr_claimed(g, who),
+               hr_score(g, who));
     }
 }
 
@@ -86,11 +87,11 @@ static void print_legal(const hr_game *g)
     for (size_t i = 0; i < total; i++) {
         print_move(moves[i]);
         if (moves[i].type == HR_SWEEP)
-            printf(" (占%d格)",
+            printf(" (claims %d)",
                    1 + hr_ray_length(g, moves[i].at, moves[i].dir));
         putchar('\n');
     }
-    printf("共 %zu 个合法操作\n", total);
+    printf("legal moves: %zu\n", total);
 }
 
 /**
@@ -135,20 +136,20 @@ int main(int argc, char **argv)
     char line[128];
 
     if (hr_init(&game, n, m) != HR_OK) {
-        fprintf(stderr, "用法：%s [半径 1..%d] [棋子数 1..%d]\n", argv[0],
+        fprintf(stderr, "Usage: %s [radius 1..%d] [pieces 1..%d]\n", argv[0],
                 HR_MAX_RADIUS, HR_MAX_PIECES);
         return 1;
     }
-    puts("指令：p q r（落子） s q r 方向（扫略：e ne nw w sw se）"
-         " u（撤销） l（合法操作） x（退出）");
+    puts("Commands: p q r (place), s q r dir (sweep; dir: e ne nw w sw se),\n"
+         "          u (undo), l (legal moves), x (quit)");
 
     for (;;) {
         print_state(&game);
         if (hr_is_over(&game))
-            printf("对局结束，P%d 获胜。（u 撤销，x 退出）\n> ",
+            printf("Game over, P%d wins. (u: undo, x: quit)\n> ",
                    (int)hr_winner(&game));
         else
-            printf("P%d 行动 > ", (int)hr_to_move(&game));
+            printf("P%d to move > ", (int)hr_to_move(&game));
         fflush(stdout);
 
         if (fgets(line, sizeof line, stdin) == NULL)
@@ -168,10 +169,10 @@ int main(int argc, char **argv)
         } else if (parse_move(line, &move)) {
             status = hr_apply(&game, move);
         } else {
-            puts("无法识别的指令");
+            puts("Unrecognized command");
         }
         if (status != HR_OK)
-            printf("错误：%s\n", hr_status_str(status));
+            printf("Error: %s\n", hr_status_str(status));
     }
     return 0;
 }

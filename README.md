@@ -10,7 +10,7 @@ make test       # run the tests
 ./build/play 2 3   # command-line game: radius 2, 3 pieces per player
 ```
 
-You can also drop `include/hexreclaim.h` and `src/hexreclaim.c` straight into your own project. The source files are UTF-8 (they contain Chinese strings); with MSVC, add `/utf-8`.
+You can also drop `include/hexreclaim.h` and `src/hexreclaim.c` straight into your own project.
 
 ## Usage
 
