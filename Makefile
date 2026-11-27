@@ -5,10 +5,11 @@ CPPFLAGS += -Iinclude
 
 BUILD := build
 LIB   := $(BUILD)/libhexreclaim.a
+PROGS := $(BUILD)/play $(BUILD)/mc $(BUILD)/test_hexreclaim $(BUILD)/test_sim
 
 .PHONY: all test clean
 
-all: $(LIB) $(BUILD)/play $(BUILD)/test_hexreclaim
+all: $(LIB) $(PROGS)
 
 $(BUILD):
 	mkdir -p $@
@@ -22,11 +23,18 @@ $(LIB): $(BUILD)/hexreclaim.o
 $(BUILD)/play: examples/play.c $(LIB) include/hexreclaim.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $< $(LIB) -o $@
 
+$(BUILD)/mc: examples/mc.c $(LIB) include/hexreclaim.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $< $(LIB) -o $@
+
 $(BUILD)/test_hexreclaim: tests/test_hexreclaim.c $(LIB) include/hexreclaim.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $< $(LIB) -o $@
 
-test: $(BUILD)/test_hexreclaim
+$(BUILD)/test_sim: tests/test_sim.c $(LIB) include/hexreclaim.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $< $(LIB) -o $@
+
+test: $(BUILD)/test_hexreclaim $(BUILD)/test_sim
 	./$(BUILD)/test_hexreclaim
+	./$(BUILD)/test_sim
 
 clean:
 	rm -rf $(BUILD)
