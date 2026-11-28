@@ -22,6 +22,10 @@
  *
  * @todo Multithreading: the library starts no threads. Parallel playouts and
  * root parallelization of the search are still to be implemented.
+ *
+ * @todo Reuse the part of the tree below the new position after a move.
+ *
+ * @todo Try playout policies stronger than uniformly random moves.
  */
 #ifndef HEXRECLAIM_MCTS_H
 #define HEXRECLAIM_MCTS_H

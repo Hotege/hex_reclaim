@@ -215,3 +215,6 @@ Separate `hr_game` and `hr_pos` objects are independent of each other, and any n
   - root parallelization of the tree search: independent searches whose root statistics are added up.
 
   Sharing one tree between threads (tree parallelization) is a further option. It needs atomic operations, which C99 does not provide.
+- **Reusing the search tree.** After a move, keep the part of the tree below the new position instead of starting a new search.
+- **Stronger playouts.** Playouts make every legal move equally likely. Try policies that prefer better moves, and measure whether they make the search stronger at equal time, since they are likely to cost speed.
+- **Exhaustive solver.** Add a solver for boards of radius 1 and 2 to the library. The library can only prove results with the tree search so far; the solver in `tests/test_mcts.c` is part of the tests.
