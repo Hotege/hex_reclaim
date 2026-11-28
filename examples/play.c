@@ -18,6 +18,9 @@
 /** @brief Nodes of the computer's search tree (64 MiB). */
 #define SEARCH_NODES (1u << 22)
 
+/** @brief Entries of the computer's transposition table (16 MiB). */
+#define SEARCH_ENTRIES (SEARCH_NODES / 4)
+
 /** @brief Iterations of a computer move if the command names no number. */
 #define DEFAULT_ITERATIONS 100000
 
@@ -171,6 +174,7 @@ static int parse_search(const char *line, uint32_t *iterations)
 static hr_status computer_move(hr_game *g, uint32_t iterations, hr_rng *rng)
 {
     static hr_mcts_node nodes[SEARCH_NODES];
+    static hr_mcts_entry table[SEARCH_ENTRIES];
     static hr_mcts search;
     const hr_board *board = hr_game_board(g);
     const hr_pos *pos = hr_game_position(g);
@@ -179,6 +183,8 @@ static hr_status computer_move(hr_game *g, uint32_t iterations, hr_rng *rng)
 
     hr_status status = hr_mcts_init(&search, board, pos, nodes, SEARCH_NODES,
                                     hr_rng_next(rng));
+    if (status == HR_OK)
+        status = hr_mcts_set_table(&search, table, SEARCH_ENTRIES);
     if (status != HR_OK)
         return status;
     hr_mcts_run(&search, iterations);

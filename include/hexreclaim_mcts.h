@@ -13,7 +13,8 @@
  * the memory of the search tree. Unlike the core it needs the C math library
  * (`-lm`).
  *
- * A search is an ::hr_mcts object plus an array of ::hr_mcts_node. Searches are
+ * A search is an ::hr_mcts object plus an array of ::hr_mcts_node and,
+ * optionally, a transposition table, see hr_mcts_set_table(). Searches are
  * independent of each other, so every thread can run its own with its own seed,
  * and the visit counts of the root moves can then be added up.
  *
@@ -55,6 +56,18 @@ typedef struct {
 } hr_mcts_node;
 
 /**
+ * @brief One slot of a transposition table.
+ *
+ * Public only so that callers can allocate tables; the fields are for internal
+ * use by the library.
+ */
+typedef struct {
+    uint64_t key;         /**< Hash of an expanded position. */
+    uint32_t first_child; /**< Index of its first child; 0 for a free slot. */
+    uint32_t children;    /**< Number of its children. */
+} hr_mcts_entry;
+
+/**
  * @brief State of one search.
  *
  * Initialize it with hr_mcts_init(). Apart from @ref exploration, the fields
@@ -66,6 +79,8 @@ typedef struct {
     hr_mcts_node *nodes; /**< Node array of the caller; node 0 is the root. */
     uint32_t capacity;   /**< Size of the node array. */
     uint32_t used;       /**< Number of nodes in use. */
+    hr_mcts_entry *table; /**< Transposition table of the caller, or NULL. */
+    uint32_t table_size;  /**< Size of the table; 0 without one. */
     hr_rng rng;          /**< Generator for expansion and playouts. */
     /**
      * Weight of the exploration term of UCB1, at least 0. Larger values
@@ -112,6 +127,36 @@ typedef struct {
 hr_status hr_mcts_init(hr_mcts *search, const hr_board *board,
                        const hr_pos *pos, hr_mcts_node *nodes, size_t capacity,
                        uint64_t seed);
+
+/**
+ * @brief Gives a search a transposition table.
+ *
+ * Different move orders often lead to the same position. Without a table, the
+ * search treats each occurrence separately. With one, it recognizes the
+ * position by hr_pos_hash() and lets all occurrences share their children: what
+ * is learned about the moves from a position, including proofs, serves every
+ * way of reaching it, and the subtree is stored only once. The statistics of
+ * the moves that lead to the position remain separate.
+ *
+ * Call this after hr_mcts_init() and before the first iteration. The table is
+ * cleared and then used by reference, like the node array. Each expanded
+ * position takes one entry, so one entry for every four nodes is plenty. A
+ * position that finds no free slot is searched without being shared.
+ *
+ * Two positions with the same hash would be taken for one, which is very
+ * unlikely, see hr_pos_hash(). It could distort the results but cannot make the
+ * search access memory out of bounds.
+ *
+ * @param search   The search.
+ * @param table    Table of @p capacity entries; its contents are overwritten.
+ * @param capacity Number of entries, at least 1. Any number works.
+ * @retval HR_OK      Success.
+ * @retval HR_ERR_ARG A pointer is NULL, @p capacity is 0 or iterations have
+ *                    already been run; the search and the table are left
+ *                    unmodified.
+ */
+hr_status hr_mcts_set_table(hr_mcts *search, hr_mcts_entry *table,
+                            size_t capacity);
 
 /**
  * @brief Runs iterations of a search.

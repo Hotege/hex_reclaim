@@ -86,7 +86,7 @@ Without a game, set up the two objects directly with `hr_board_init` and `hr_pos
 - **Playout policy.** `hr_pos_random_action` and `hr_pos_playout` make every legal move equally likely.
 - **Waiting moves.** Sweeps of one piece that are blocked at the first cell have the same result. `hr_pos_actions` lists one of them, so a search tree gets no duplicate children, and `hr_pos_random_action` reports that same one.
 - **Stopping early.** `HR_PLAY_TO_DECIDED` stops once a player has locked in more than half of the cells. Use `HR_PLAY_TO_END` if the final scores matter.
-- **Transpositions.** A position holds no history and no padding, so equal positions are equal byte for byte and can be compared or hashed as bytes.
+- **Transpositions.** A position holds no history and no padding, so positions reached by different move orders are equal byte for byte. `hr_pos_hash` computes a 64-bit hash of a position for transposition tables.
 - **Custom policies.** Callers may read the fields of `hr_board` and `hr_pos` (`neighbor`, the cell sets, the counters) together with `hr_set_has` and `hr_pos_ray_length`.
 - **No undo.** Keep a copy of the position instead.
 
@@ -99,10 +99,12 @@ Without a game, set up the two objects directly with `hr_board_init` and `hr_pos
 #include "hexreclaim_mcts.h"
 
 #define NODES (1u << 20)                       /* 16 MiB */
+#define ENTRIES (NODES / 4)                    /* 4 MiB */
 
 int main(void)
 {
     static hr_mcts_node nodes[NODES];          /* the tree, owned by the caller */
+    static hr_mcts_entry table[ENTRIES];       /* transposition table, optional */
     static hr_mcts search;
     hr_game g;
     if (hr_init(&g, 3, 3) != HR_OK)
@@ -110,7 +112,8 @@ int main(void)
 
     const hr_board *board = hr_game_board(&g);
     if (hr_mcts_init(&search, board, hr_game_position(&g), nodes, NODES,
-                     1 /* seed */) != HR_OK)
+                     1 /* seed */) != HR_OK ||
+        hr_mcts_set_table(&search, table, ENTRIES) != HR_OK)
         return 1;
     hr_mcts_run(&search, 20000);               /* iterations */
 
@@ -123,12 +126,19 @@ int main(void)
 ```
 
 - **Memory.** The tree lives in the node array given to `hr_mcts_init`, 16 bytes per node. Expanding a node adds one child per distinct action; searching from the start of a game with radius 2 to 5 takes about 3 to 15 nodes per iteration. When the array is full, the search goes on without growing the tree. `HR_MCTS_MIN_NODES` is large enough for any position, but a useful search wants far more.
+- **Transposition table.** Different move orders often reach the same position. `hr_mcts_set_table`, called before the first iteration, lets all of them share the position's children, so that what is learned and proven about its moves serves every path to it. One 16-byte entry for every four nodes is plenty, and clearing the table takes time in proportion to its size. See below for what to expect.
 - **Time limits.** `hr_mcts_run` may be called repeatedly: run small batches and check the clock in between.
 - **Proven results.** `hr_mcts_proven` returns the winner with best play once it is known, and the search then stops. The `proven` field of `hr_mcts_move` says the same about a single move.
 - **All moves.** `hr_mcts_moves` reports visits and wins of every distinct move of the searched position.
-- **Threads.** One search runs on one thread. To use several, give each thread its own search, node array and seed, then add up the visits of each action, preferring any move that some search has proven to win.
+- **Threads.** One search runs on one thread. To use several, give each thread its own search, node array, table and seed, then add up the visits of each action, preferring any move that some search has proven to win.
 - **After a move.** Initialize a new search from the new position; trees are not reused.
 - **Tuning.** The field `exploration` (default `HR_MCTS_EXPLORATION`, 0.35) may be changed after initialization.
+
+What the table brought in measurements with one thread:
+
+- **Proofs get cheaper**, the more so the harder they are. Over sets of radius-2 positions, the total iterations needed to prove them fell by factors of up to 3.7 and the total time by factors of up to 2.9; easy positions gained little or nothing in time.
+- **Playing strength** at equal numbers of iterations (2000 and 20000, radius 2 to 4) did not change measurably.
+- **Iterations** were up to about 20% slower.
 
 ## Coordinates and directions
 
@@ -166,11 +176,11 @@ for (int r = -n; r <= n; r++)
 | Analysis | `hr_legal_moves` `hr_ray_length` `hr_step` |
 | History | `hr_ply` `hr_history_move` |
 | Board and position | `hr_board_init` `hr_pos_init` `hr_game_board` `hr_game_position` `hr_board_index` |
-| Position queries | `hr_pos_to_move` `hr_pos_is_over` `hr_pos_score` `hr_pos_decided` `hr_pos_cell` `hr_pos_ray_length` `hr_set_has` |
+| Position queries | `hr_pos_to_move` `hr_pos_is_over` `hr_pos_score` `hr_pos_decided` `hr_pos_cell` `hr_pos_ray_length` `hr_pos_hash` `hr_set_has` |
 | Actions | `hr_action_place` `hr_action_sweep` `hr_action_cell` `hr_action_type` `hr_action_dir` `hr_action_encode` `hr_action_decode` |
 | Simulation | `hr_pos_apply` `hr_pos_actions` `hr_pos_random_action` `hr_pos_playout` |
 | Random numbers | `hr_rng_seed` `hr_rng_next` `hr_rng_below` |
-| Tree search | `hr_mcts_init` `hr_mcts_run` `hr_mcts_best` `hr_mcts_moves` `hr_mcts_iterations` `hr_mcts_proven` |
+| Tree search | `hr_mcts_init` `hr_mcts_set_table` `hr_mcts_run` `hr_mcts_best` `hr_mcts_moves` `hr_mcts_iterations` `hr_mcts_proven` |
 | Errors | `hr_status_str` |
 
 See the comments in the headers under `include/` for the detailed contracts.
@@ -190,10 +200,10 @@ The rules follow the design document (2026-11-26 version). The following are cho
 
 ## Thread safety
 
-Separate `hr_game` and `hr_pos` objects are independent of each other, and any number of threads may share one `hr_board`. Give each thread its own positions and its own `hr_rng` with its own seed, and each search its own node array. If multiple threads modify the same object, you must do your own locking.
+Separate `hr_game` and `hr_pos` objects are independent of each other, and any number of threads may share one `hr_board`. Give each thread its own positions and its own `hr_rng` with its own seed, and each search its own node array and table. If multiple threads modify the same object, you must do your own locking.
 
 ## Tests
 
 - `tests/test_hexreclaim.c` contains test cases for each rule, plus differential testing over 4152 random games with radius 1–8: every move is compared against a separately written naive model, and after each game ends, replay and step-by-step undo are checked.
-- `tests/test_sim.c` tests the simulation layer: the cell sets stay consistent, actions lead to exactly the positions the legal moves lead to, sampled moves follow the documented distribution, and playouts agree with move-by-move play in both stopping modes.
-- `tests/test_mcts.c` tests the tree search: visit counts, win counts and proofs are consistent throughout the tree; proven results agree with an exhaustive solver on the radius-1 board and on radius-2 endgames; searches are reproducible; and the search beats random play.
+- `tests/test_sim.c` tests the simulation layer: the cell sets stay consistent, actions lead to exactly the positions the legal moves lead to, sampled moves follow the documented distribution, playouts agree with move-by-move play in both stopping modes, and the position hash spreads well and separates the positions of many random games.
+- `tests/test_mcts.c` tests the tree search: visit counts, win counts and proofs are consistent throughout the tree; proven results agree with an exhaustive solver on the radius-1 board and on radius-2 endgames; with a transposition table only equal positions share children; searches are reproducible; and the search beats random play.

@@ -5,10 +5,20 @@
  * Nodes hold no positions: each iteration replays the moves from a copy of the
  * root position. The children of a node are allocated together and shuffled, so
  * visiting unvisited children in order tries them in random order.
+ *
+ * A node stands for a move: its statistics are those of the move into it. With
+ * a transposition table, nodes whose moves lead to equal positions point to one
+ * common block of children, which turns the tree into a directed acyclic graph.
+ * There can be no cycles, because every move advances at least one cell from
+ * empty to piece or from piece to claimed, and no cell ever goes back.
  */
 #include "hexreclaim_mcts.h"
 
 #include <math.h>
+#include <string.h>
+
+/** @brief Number of table slots examined for one position. */
+#define TABLE_PROBES 8
 
 /* Fails to compile if the bit fields of a node became too narrow. */
 typedef char hr_mcts_fields_fit[(HR_ACTION_LIMIT <= 2048 &&
@@ -34,6 +44,74 @@ static unsigned proof_of(int winner)
 static hr_player proven_winner(unsigned proven)
 {
     return proven == 0 ? HR_NOBODY : (hr_player)(proven - 1);
+}
+
+/**
+ * @brief Finds the table slot of a position.
+ *
+ * Examines a few slots, starting where the hash points. Entries are never
+ * removed, so a free slot ends the search.
+ *
+ * @param search A search with a table.
+ * @param key    Hash of the position.
+ * @return The slot holding the key, else the free slot where it belongs, else
+ *         NULL if all slots examined hold other positions.
+ */
+static hr_mcts_entry *find_slot(const hr_mcts *search, uint64_t key)
+{
+    uint32_t size = search->table_size;
+    uint32_t i = (uint32_t)(((key >> 32) * size) >> 32);
+
+    for (int probe = 0; probe < TABLE_PROBES; probe++) {
+        hr_mcts_entry *entry = &search->table[i];
+        if (entry->first_child == 0 || entry->key == key)
+            return entry;
+        i = i + 1 < size ? i + 1 : 0;
+    }
+    return NULL;
+}
+
+/**
+ * @brief Gives a node the children of an equal position expanded earlier.
+ *
+ * @param search The search.
+ * @param node   A node without children.
+ * @param pos    The position of the node.
+ * @return `true` if the table knew the position.
+ */
+static bool share(const hr_mcts *search, hr_mcts_node *node, const hr_pos *pos)
+{
+    if (search->table_size == 0)
+        return false;
+
+    const hr_mcts_entry *entry = find_slot(search, hr_pos_hash(pos));
+    if (entry == NULL || entry->first_child == 0)
+        return false;
+    node->first_child = entry->first_child;
+    node->children = entry->children;
+    return true;
+}
+
+/**
+ * @brief Enters the children of an expanded node into the table, if possible.
+ *
+ * @param search The search.
+ * @param node   A node that has just been expanded.
+ * @param pos    The position of the node.
+ */
+static void record(const hr_mcts *search, const hr_mcts_node *node,
+                   const hr_pos *pos)
+{
+    if (search->table_size == 0)
+        return;
+
+    uint64_t key = hr_pos_hash(pos);
+    hr_mcts_entry *entry = find_slot(search, key);
+    if (entry != NULL) {
+        entry->key = key;
+        entry->first_child = node->first_child;
+        entry->children = node->children;
+    }
 }
 
 /**
@@ -68,6 +146,7 @@ static bool expand(hr_mcts *search, hr_mcts_node *node, const hr_pos *pos)
         child->proven = 0;
         actions[i] = actions[left - 1];
     }
+    record(search, node, pos);
     return true;
 }
 
@@ -87,8 +166,22 @@ static hr_mcts_node *select_child(const hr_mcts *search,
     hr_mcts_node *child = &search->nodes[node->first_child];
     hr_mcts_node *best = child;
     unsigned loss = proof_of(mover ^ 1);
-    double log_visits = node->visits > 1 ? log((double)node->visits) : 0.0;
+    uint32_t total = node->visits;
     double best_value = -1.0;
+
+    if (search->table_size != 0) {
+        /*
+         * Other nodes may share the children: count the iterations that went
+         * through them, and take a win that another path has proven.
+         */
+        total = 0;
+        for (unsigned i = 0; i < node->children; i++) {
+            if (child[i].proven == proof_of(mover))
+                return &child[i];
+            total += child[i].visits;
+        }
+    }
+    double log_visits = total > 1 ? log((double)total) : 0.0;
 
     for (unsigned i = 0; i < node->children; i++) {
         if (child[i].visits == 0)
@@ -144,14 +237,21 @@ static void iterate(hr_mcts *search)
     hr_mcts_node *node = &search->nodes[0];
     path[0] = 0;
 
-    while (node->proven == 0 && node->children != 0) {
-        node = select_child(search, node, pos.turn);
-        hr_pos_apply(&search->board, &pos, (hr_action)node->action);
+    /* Descend while the node has children or can share those of another. */
+    while (node->proven == 0 &&
+           (node->children != 0 || share(search, node, &pos))) {
+        hr_mcts_node *next = select_child(search, node, pos.turn);
+        /* Fails only if two positions have the same hash. */
+        if (hr_pos_apply(&search->board, &pos, (hr_action)next->action) !=
+            HR_OK)
+            break;
+        node = next;
         path[++depth] = (uint32_t)(node - search->nodes);
     }
 
     /* A leaf is expanded when it is reached for the second time. */
-    if (node->proven == 0 && node->visits > 0 && expand(search, node, &pos)) {
+    if (node->proven == 0 && node->children == 0 && node->visits > 0 &&
+        expand(search, node, &pos)) {
         node = select_child(search, node, pos.turn);
         hr_pos_apply(&search->board, &pos, (hr_action)node->action);
         path[++depth] = (uint32_t)(node - search->nodes);
@@ -200,6 +300,8 @@ hr_status hr_mcts_init(hr_mcts *search, const hr_board *board,
     search->capacity =
         capacity > UINT32_MAX ? UINT32_MAX : (uint32_t)capacity;
     search->used = 1;
+    search->table = NULL;
+    search->table_size = 0;
     hr_rng_seed(&search->rng, seed);
     search->exploration = HR_MCTS_EXPLORATION;
 
@@ -215,6 +317,20 @@ hr_status hr_mcts_init(hr_mcts *search, const hr_board *board,
     hr_player decided = hr_pos_decided(&search->root);
     if (decided != HR_NOBODY)
         nodes[0].proven = proof_of(decided);
+    return HR_OK;
+}
+
+hr_status hr_mcts_set_table(hr_mcts *search, hr_mcts_entry *table,
+                            size_t capacity)
+{
+    if (search == NULL || table == NULL || capacity == 0 ||
+        search->nodes[0].visits != 0)
+        return HR_ERR_ARG;
+
+    search->table = table;
+    search->table_size =
+        capacity > UINT32_MAX ? UINT32_MAX : (uint32_t)capacity;
+    memset(table, 0, search->table_size * sizeof *table);
     return HR_OK;
 }
 

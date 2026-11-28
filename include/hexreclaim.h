@@ -574,6 +574,24 @@ int hr_pos_ray_length(const hr_board *board, const hr_pos *pos, int cell,
  */
 hr_status hr_pos_apply(const hr_board *board, hr_pos *pos, hr_action action);
 
+/**
+ * @brief Computes a hash of a position, for transposition tables.
+ *
+ * Positions reached by different move orders are equal, so their hashes are
+ * equal too. The hash covers the pieces, the claims, the player to move, the
+ * radius and the number of pieces per player, which determine everything else
+ * in a position. It is the same on every platform, and it costs a few
+ * multiplications per word of a cell set in use.
+ *
+ * As with any 64-bit hash, different positions can have the same one. This is
+ * very unlikely: among ten million positions, the chance that any two collide
+ * is a few in a million. Compare the positions where that is not good enough.
+ *
+ * @param pos A position set up by the library.
+ * @return The hash.
+ */
+uint64_t hr_pos_hash(const hr_pos *pos);
+
 /** @} */
 
 /**

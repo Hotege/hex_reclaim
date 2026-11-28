@@ -4,7 +4,8 @@
  *
  * Proven results are compared with an exhaustive solver that shares only the
  * rules with the search: it tries every action code with hr_pos_apply() and
- * plays each line to the very end of the game.
+ * plays each line to the very end of the game. Searches are tested with and
+ * without a transposition table.
  */
 #include "hexreclaim_mcts.h"
 
@@ -34,6 +35,12 @@ static long checks = 0;
 
 /** @brief Node array shared by the tests. */
 static hr_mcts_node arena[ARENA];
+
+/** @brief Size of the transposition table shared by the tests. */
+#define ENTRIES (1u << 20)
+
+/** @brief Transposition table shared by the tests. */
+static hr_mcts_entry entries[ENTRIES];
 
 /* ============================================================ Exact solver */
 
@@ -204,6 +211,174 @@ static void check_node(const hr_mcts *s, uint32_t index, const hr_pos *p,
     }
 }
 
+/** @brief What check_graph() collects about one block of children. */
+typedef struct {
+    hr_pos pos;      /**< Position whose moves the block holds. */
+    uint32_t first;  /**< Index of the first node of the block. */
+    uint32_t count;  /**< Number of nodes in the block. */
+    long in_visits;  /**< Visits of the nodes that point to the block. */
+    long in_wins;    /**< Wins of these nodes. */
+    long at_least;   /**< Iterations that must have gone on into the block. */
+} block_info;
+
+/** @brief State of one check_graph(). */
+typedef struct {
+    const hr_mcts *s;   /**< The search. */
+    uint32_t *block_of; /**< Per node index: 1 + number of the block there. */
+    block_info *blocks; /**< Blocks found. */
+    size_t used;        /**< Number of blocks found. */
+    long shared;        /**< Nodes found pointing to an already known block. */
+    int full;           /**< As for check_node(). */
+    int exact;          /**< As for check_node(). */
+} graph;
+
+/**
+ * @brief Checks one node of a search with a table, and what lies below it.
+ *
+ * Blocks of children reached before are not walked again.
+ *
+ * @param g Collected state.
+ * @param index Index of the node.
+ * @param p Position of the node.
+ */
+static void walk(graph *g, uint32_t index, const hr_pos *p)
+{
+    const hr_mcts *s = g->s;
+    CHECK(index < s->used);
+    const hr_mcts_node *node = &s->nodes[index];
+    int mover = p->turn;
+    hr_player decided = hr_pos_decided(p);
+
+    CHECK(node->wins <= node->visits);
+    CHECK(node->proven <= 2);
+    if (g->exact && node->proven != 0)
+        CHECK(solve(&s->board, p) == (int)node->proven - 1);
+
+    if (node->children == 0) {
+        if (node->proven != 0)
+            CHECK(decided == (hr_player)(node->proven - 1));
+        else if (node->visits > 0)
+            CHECK(decided == HR_NOBODY);
+        if (node->proven == 0 && !g->full)
+            CHECK(node->visits <= 1);
+        return;
+    }
+    CHECK(index == 0 || decided == HR_NOBODY);
+
+    hr_action listed[HR_MAX_MOVES];
+    char seen[HR_ACTION_LIMIT] = {0};
+    size_t count = hr_pos_actions(&s->board, p, listed, HR_MAX_MOVES);
+    CHECK(node->children == count);
+    for (size_t i = 0; i < count; i++)
+        seen[listed[i]] = 1;
+
+    int any_win = 0, all_lost = 1;
+    for (size_t i = 0; i < count; i++) {
+        const hr_mcts_node *child = &s->nodes[node->first_child + i];
+        CHECK(seen[child->action] == 1); /* each action exactly once */
+        seen[child->action] = 2;
+        any_win |= child->proven == 1u + (unsigned)mover;
+        all_lost &= child->proven == 2u - (unsigned)mover;
+    }
+    /* An unproven node may not yet know what others proved about the block. */
+    if (decided != HR_NOBODY)
+        CHECK(node->proven == 1u + (unsigned)decided);
+    else if (node->proven == 1u + (unsigned)mover)
+        CHECK(any_win);
+    else if (node->proven != 0)
+        CHECK(all_lost);
+
+    if (g->block_of[node->first_child] == 0) {
+        block_info *k = &g->blocks[g->used];
+        memset(k, 0, sizeof *k);
+        k->pos = *p;
+        k->first = node->first_child;
+        k->count = node->children;
+        g->block_of[node->first_child] = (uint32_t)++g->used;
+        for (size_t i = 0; i < count; i++) {
+            uint32_t c = node->first_child + (uint32_t)i;
+            hr_pos next = *p;
+            CHECK(hr_pos_apply(&s->board, &next,
+                               (hr_action)s->nodes[c].action) == HR_OK);
+            walk(g, c, &next);
+        }
+    } else {
+        g->shared++;
+    }
+
+    block_info *k = &g->blocks[g->block_of[node->first_child] - 1];
+    /* Only equal positions share children. */
+    CHECK(memcmp(&k->pos, p, sizeof *p) == 0);
+    CHECK(k->count == node->children);
+    k->in_visits += node->visits;
+    k->in_wins += node->wins;
+    /* At most one visit of an unproven node ends there. */
+    if (node->proven == 0 && node->visits > 0)
+        k->at_least += (long)node->visits - 1;
+}
+
+/**
+ * @brief Orders blocks by position.
+ *
+ * @param a One ::block_info.
+ * @param b The other.
+ * @return Negative, zero or positive, as qsort() expects.
+ */
+static int by_position(const void *a, const void *b)
+{
+    return memcmp(&((const block_info *)a)->pos,
+                  &((const block_info *)b)->pos, sizeof(hr_pos));
+}
+
+/**
+ * @brief Checks the graph of a search with a transposition table.
+ *
+ * Verifies what check_node() verifies, as far as it holds when positions are
+ * shared, and that only equal positions share children.
+ *
+ * @param s The search.
+ * @param p Position searched.
+ * @param full Non-zero if the node array may have run out.
+ * @param exact Non-zero to compare every proof with the solver.
+ * @param unique Non-zero if the table cannot have run out of slots, so that no
+ *               position may have two blocks of children.
+ * @return Number of nodes that share the children of another node.
+ */
+static long check_graph(const hr_mcts *s, const hr_pos *p, int full,
+                        int exact, int unique)
+{
+    graph g = {s, NULL, NULL, 0, 0, full, exact};
+    g.block_of = calloc(s->used, sizeof *g.block_of);
+    g.blocks = malloc(s->used * sizeof *g.blocks);
+    CHECK(g.block_of != NULL && g.blocks != NULL);
+    walk(&g, 0, p);
+
+    for (size_t i = 0; i < g.used; i++) {
+        const block_info *k = &g.blocks[i];
+        long visits = 0, wins = 0; /* wins of who moved into the position */
+        for (uint32_t c = k->first; c < k->first + k->count; c++) {
+            visits += s->nodes[c].visits;
+            wins += (long)s->nodes[c].visits - (long)s->nodes[c].wins;
+        }
+        CHECK(visits <= k->in_visits);
+        if (!full)
+            CHECK(visits >= k->at_least);
+        CHECK(wins <= k->in_wins && k->in_wins - wins <= k->in_visits - visits);
+        if (k->first == s->nodes[0].first_child)
+            CHECK(visits == (long)s->nodes[0].visits);
+    }
+
+    if (unique && !full) {
+        qsort(g.blocks, g.used, sizeof *g.blocks, by_position);
+        for (size_t i = 1; i < g.used; i++)
+            CHECK(by_position(&g.blocks[i - 1], &g.blocks[i]) != 0);
+    }
+
+    free(g.block_of);
+    free(g.blocks);
+    return g.shared;
+}
+
 /**
  * @brief Plays random moves from the start.
  *
@@ -271,6 +446,78 @@ static void test_init(void)
     moves[2].action = 999;
     CHECK(hr_mcts_moves(&s, moves, 2) == 19);
     CHECK(moves[2].action == 999);
+
+    /* A table is only accepted before the first iteration. */
+    entries[0].key = 12345;
+    memcpy(&before, &s, sizeof s);
+    CHECK(hr_mcts_set_table(&s, entries, ENTRIES) == HR_ERR_ARG);
+    CHECK(memcmp(&s, &before, sizeof s) == 0);
+    CHECK(hr_mcts_init(&s, &b, &p, arena, ARENA, 1) == HR_OK);
+    memcpy(&before, &s, sizeof s);
+    CHECK(hr_mcts_set_table(NULL, entries, ENTRIES) == HR_ERR_ARG);
+    CHECK(hr_mcts_set_table(&s, NULL, ENTRIES) == HR_ERR_ARG);
+    CHECK(hr_mcts_set_table(&s, entries, 0) == HR_ERR_ARG);
+    CHECK(memcmp(&s, &before, sizeof s) == 0);
+    CHECK(entries[0].key == 12345);
+    CHECK(hr_mcts_set_table(&s, entries, 1) == HR_OK);
+    CHECK(entries[0].key == 0 && entries[0].first_child == 0);
+    CHECK(hr_mcts_run(&s, 500) == 500);
+    check_graph(&s, &p, 0, 0, 0);
+}
+
+/** @brief Checks searches with transposition tables of various sizes. */
+static void test_tables(void)
+{
+    static const int sizes[][2] = {{1, 2}, {2, 3}, {3, 6}, {4, 6}, {5, 12},
+                                   {8, 255}};
+    static const size_t capacities[] = {1, 7, 64, ENTRIES};
+    hr_rng rng;
+    long shared = 0;
+    hr_rng_seed(&rng, 7);
+
+    for (size_t k = 0; k < sizeof sizes / sizeof sizes[0]; k++) {
+        hr_board b;
+        CHECK(hr_board_init(&b, sizes[k][0]) == HR_OK);
+        for (int stage = 0; stage < 4; stage++) {
+            hr_pos p;
+            hr_mcts s;
+            random_position(&b, &p, sizes[k][1], stage * b.cells / 3, &rng);
+            size_t moves = hr_pos_actions(&b, &p, NULL, 0);
+
+            for (int t = 0; t < 4; t++) {
+                size_t cap = capacities[t];
+                CHECK(hr_mcts_init(&s, &b, &p, arena, ARENA, k) == HR_OK);
+                CHECK(hr_mcts_set_table(&s, entries, cap) == HR_OK);
+                uint32_t done = hr_mcts_run(&s, 3000);
+                CHECK(done == 3000 || hr_mcts_proven(&s) != HR_NOBODY);
+                long found = check_graph(&s, &p, 0, 0, cap == ENTRIES);
+                if (cap == ENTRIES)
+                    shared += found;
+
+                size_t small = 3 * moves + 1;
+                CHECK(hr_mcts_init(&s, &b, &p, arena, small, k) == HR_OK);
+                CHECK(hr_mcts_set_table(&s, entries, cap) == HR_OK);
+                hr_mcts_run(&s, 3000);
+                CHECK(s.used <= small);
+                check_graph(&s, &p, 1, 0, 0);
+            }
+        }
+    }
+    CHECK(shared > 200);
+
+    /* In a longer search many positions are reached in more than one way. */
+    hr_board b;
+    hr_pos p;
+    hr_mcts s;
+    CHECK(hr_board_init(&b, 2) == HR_OK);
+    CHECK(hr_pos_init(&p, &b, 3) == HR_OK);
+    CHECK(hr_mcts_init(&s, &b, &p, arena, ARENA, 1) == HR_OK);
+    CHECK(hr_mcts_set_table(&s, entries, ENTRIES) == HR_OK);
+    CHECK(hr_mcts_run(&s, 50000) == 50000);
+    long again = check_graph(&s, &p, 0, 0, 1);
+    CHECK(again > 500);
+    printf("radius 2, 50000 iterations: %ld nodes share the children of "
+           "another\n", again);
 }
 
 /** @brief Checks trees grown on boards of various sizes. */
@@ -378,6 +625,18 @@ static void test_reproducible(void)
     CHECK(hr_mcts_init(&y, &b, &p, second, 1u << 18, 8) == HR_OK);
     hr_mcts_run(&y, 4000);
     CHECK(!same_results(&x, &y));
+
+    /* The same with tables, which hold earlier contents. */
+    static hr_mcts_entry other[ENTRIES];
+    memset(other, 0xAA, sizeof other);
+    CHECK(hr_mcts_init(&x, &b, &p, arena, 1u << 18, 7) == HR_OK);
+    CHECK(hr_mcts_init(&y, &b, &p, second, 1u << 18, 7) == HR_OK);
+    CHECK(hr_mcts_set_table(&x, entries, ENTRIES) == HR_OK);
+    CHECK(hr_mcts_set_table(&y, other, ENTRIES) == HR_OK);
+    hr_mcts_run(&x, 4000);
+    for (int i = 0; i < 40; i++)
+        hr_mcts_run(&y, 100);
+    CHECK(same_results(&x, &y));
 }
 
 /** @brief Counters of the comparisons with the solver. */
@@ -385,6 +644,9 @@ typedef struct {
     int won;  /**< Positions won by the player to move. */
     int lost; /**< Positions lost by the player to move. */
 } tally;
+
+/** @brief Table sizes used in turn by check_exact(); 0 means no table. */
+static const size_t EXACT_TABLES[] = {0, ENTRIES, 0, 5};
 
 /**
  * @brief Searches a position until it is proven and compares with the solver.
@@ -399,21 +661,31 @@ static void check_exact(const hr_board *b, const hr_pos *p, uint64_t seed,
 {
     hr_mcts s;
     int truth = solve(b, p);
+    size_t cap = EXACT_TABLES[(t->won + t->lost) % 4];
 
-    CHECK(hr_mcts_init(&s, b, p, arena, ARENA, seed) == HR_OK);
-    hr_mcts_run(&s, 2000000);
-    CHECK(hr_mcts_proven(&s) == (hr_player)truth);
-    check_node(&s, 0, p, s.used > ARENA - HR_MAX_MOVES, 1);
+    /* Without a table, with a large one, and with a very small one. */
+    for (int round = 0; round < 2; round++, cap = ENTRIES) {
+        CHECK(hr_mcts_init(&s, b, p, arena, ARENA, seed) == HR_OK);
+        if (cap != 0)
+            CHECK(hr_mcts_set_table(&s, entries, cap) == HR_OK);
+        hr_mcts_run(&s, 2000000);
+        CHECK(hr_mcts_proven(&s) == (hr_player)truth);
+        int full = s.used > ARENA - HR_MAX_MOVES;
+        if (cap != 0)
+            check_graph(&s, p, full, 1, cap == ENTRIES);
+        else
+            check_node(&s, 0, p, full, 1);
 
-    hr_mcts_move best = hr_mcts_best(&s);
-    hr_pos next = *p;
-    CHECK(hr_pos_apply(b, &next, best.action) == HR_OK);
-    if (truth == p->turn) { /* the recommended move keeps the win */
-        CHECK(solve(b, &next) == truth);
-        t->won++;
-    } else {
-        t->lost++;
+        hr_mcts_move best = hr_mcts_best(&s);
+        hr_pos next = *p;
+        CHECK(hr_pos_apply(b, &next, best.action) == HR_OK);
+        if (truth == p->turn) /* the recommended move keeps the win */
+            CHECK(solve(b, &next) == truth);
     }
+    if (truth == p->turn)
+        t->won++;
+    else
+        t->lost++;
 }
 
 /** @brief Compares the search with the solver on the board of radius 1. */
@@ -487,6 +759,8 @@ static void test_against_random(void)
                 hr_mcts s;
                 CHECK(hr_mcts_init(&s, &b, &p, arena, ARENA,
                                    hr_rng_next(&rng)) == HR_OK);
+                if (g % 4 < 2)
+                    CHECK(hr_mcts_set_table(&s, entries, ENTRIES) == HR_OK);
                 hr_mcts_run(&s, 2000);
                 a = hr_mcts_best(&s).action;
             } else {
@@ -509,6 +783,7 @@ int main(void)
 {
     test_init();
     test_trees();
+    test_tables();
     test_decided_root();
     test_reproducible();
     test_exact_small();

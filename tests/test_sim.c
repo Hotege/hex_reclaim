@@ -1,6 +1,7 @@
 /**
  * @file test_sim.c
- * @brief Tests of the simulation layer: board, position, actions and playouts.
+ * @brief Tests of the simulation layer: board, position, actions, hashes and
+ * playouts.
  *
  * test_hexreclaim.c checks the rules against an independent model through the
  * ::hr_game interface, which is built on the same position code. The tests here
@@ -194,6 +195,124 @@ static void test_transposition(void)
         CHECK(hr_pos_apply(&b, &y, hr_action_place(order_y[i])) == HR_OK);
     }
     CHECK(same(&x, &y));
+    CHECK(hr_pos_hash(&x) == hr_pos_hash(&y));
+
+    /* Everything that tells positions apart changes the hash. */
+    uint64_t h = hr_pos_hash(&x);
+    y.turn ^= 1;
+    CHECK(hr_pos_hash(&y) != h);
+    CHECK(hr_pos_init(&y, &b, 5) == HR_OK);
+    CHECK(hr_pos_init(&x, &b, 4) == HR_OK);
+    CHECK(hr_pos_hash(&x) != hr_pos_hash(&y));
+    h = hr_pos_hash(&x);
+    CHECK(hr_board_init(&b, 3) == HR_OK);
+    CHECK(hr_pos_init(&y, &b, 4) == HR_OK);
+    CHECK(hr_pos_hash(&y) != h);
+}
+
+/** @brief Number of positions collected by test_hash(). */
+#define HASH_SAMPLES 300000
+
+/** @brief A position with its hash. */
+typedef struct {
+    uint64_t hash; /**< Hash of the position. */
+    hr_pos pos;    /**< The position. */
+} hashed;
+
+/**
+ * @brief Orders positions by hash.
+ *
+ * @param a One ::hashed.
+ * @param b The other.
+ * @return Negative, zero or positive, as qsort() expects.
+ */
+static int by_hash(const void *a, const void *b)
+{
+    uint64_t x = ((const hashed *)a)->hash, y = ((const hashed *)b)->hash;
+    return (x > y) - (x < y);
+}
+
+/**
+ * @brief Counts the set bits of a word.
+ *
+ * @param x The word.
+ * @return The number of set bits.
+ */
+static int bits_set(uint64_t x)
+{
+    int n = 0;
+    for (; x != 0; x &= x - 1)
+        n++;
+    return n;
+}
+
+/**
+ * @brief Tests the quality of the position hash on positions from random games.
+ *
+ * Different positions must have different hashes, every bit of the hashes must
+ * be set about half of the time, the leading bits must spread evenly over table
+ * slots, and changing one cell must change about half of the bits.
+ */
+static void test_hash(void)
+{
+    static const int pieces[] = {1, 3, 6, HR_MAX_PIECES};
+    static long ones[64], bucket[1024];
+    hashed *all = malloc(HASH_SAMPLES * sizeof *all);
+    hr_rng rng;
+    long count = 0, flips = 0, flipped = 0;
+    hr_rng_seed(&rng, 99);
+    CHECK(all != NULL);
+
+    for (int game = 0; count < HASH_SAMPLES; game++) {
+        hr_board b;
+        hr_pos p;
+        hr_action a;
+        CHECK(hr_board_init(&b, 1 + game % HR_MAX_RADIUS) == HR_OK);
+        CHECK(hr_pos_init(&p, &b, pieces[game / HR_MAX_RADIUS % 4]) == HR_OK);
+        while (count < HASH_SAMPLES &&
+               hr_pos_random_action(&b, &p, &rng, &a)) {
+            CHECK(hr_pos_apply(&b, &p, a) == HR_OK);
+            all[count].hash = hr_pos_hash(&p);
+            all[count].pos = p;
+
+            hr_pos other = p; /* not a legal position, but a close one */
+            int c = (int)hr_rng_below(&rng, b.cells);
+            other.claimed[c & 1][c >> 6] ^= (uint64_t)1 << (c & 63);
+            flips += bits_set(all[count].hash ^ hr_pos_hash(&other));
+            flipped++;
+            count++;
+        }
+    }
+
+    qsort(all, (size_t)count, sizeof *all, by_hash);
+    long distinct = 0;
+    for (long i = 0; i < count; i++) {
+        if (i > 0 && all[i].hash == all[i - 1].hash) {
+            CHECK(same(&all[i].pos, &all[i - 1].pos));
+            continue;
+        }
+        distinct++;
+        for (int bit = 0; bit < 64; bit++)
+            ones[bit] += (all[i].hash >> bit) & 1;
+        bucket[all[i].hash >> 54]++;
+    }
+    CHECK(distinct > HASH_SAMPLES / 2);
+
+    /* A fair bit is set in half of the cases, +- sqrt(distinct) / 2. */
+    for (int bit = 0; bit < 64; bit++) {
+        double diff = (double)ones[bit] - 0.5 * (double)distinct;
+        CHECK(diff * diff <= 25.0 * 0.25 * (double)distinct);
+    }
+
+    /* Chi-square with 1023 degrees of freedom: mean 1023, deviation 45. */
+    double expected = (double)distinct / 1024.0, chi = 0.0;
+    for (int i = 0; i < 1024; i++)
+        chi += (bucket[i] - expected) * (bucket[i] - expected) / expected;
+    CHECK(chi > 800.0 && chi < 1250.0);
+
+    double mean = (double)flips / (double)flipped;
+    CHECK(mean > 31.9 && mean < 32.1);
+    free(all);
 }
 
 /**
@@ -471,6 +590,7 @@ int main(void)
     test_actions_encoding();
     test_pos_errors();
     test_transposition();
+    test_hash();
     test_mirrored_games();
     test_sampling();
     test_playout();

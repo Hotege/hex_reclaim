@@ -430,6 +430,41 @@ hr_status hr_pos_apply(const hr_board *board, hr_pos *pos, hr_action action)
     return status;
 }
 
+/* ================================================================= Hashing */
+
+/**
+ * @brief Scrambles a word so that every input bit affects every output bit.
+ *
+ * The output function of SplitMix64, which maps different words to different
+ * words.
+ *
+ * @param x The word.
+ * @return The scrambled word.
+ */
+static inline uint64_t mix64(uint64_t x)
+{
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
+}
+
+uint64_t hr_pos_hash(const hr_pos *pos)
+{
+    int cells = 3 * pos->radius * (pos->radius + 1) + 1;
+    int words = (cells + 63) / 64;
+    uint64_t h = mix64((uint64_t)pos->radius | (uint64_t)pos->pieces << 8 |
+                       (uint64_t)pos->turn << 16);
+
+    /* The empty cells and the counters follow from these sets. */
+    for (int w = 0; w < words; w++) {
+        h = mix64(h ^ pos->piece[HR_P0][w]);
+        h = mix64(h ^ pos->piece[HR_P1][w]);
+        h = mix64(h ^ pos->claimed[HR_P0][w]);
+        h = mix64(h ^ pos->claimed[HR_P1][w]);
+    }
+    return h;
+}
+
 /* =============================================================== Simulation */
 
 size_t hr_pos_actions(const hr_board *board, const hr_pos *pos, hr_action *out,
