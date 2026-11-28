@@ -19,6 +19,9 @@
  * and the visit counts of the root moves can then be added up.
  *
  * To search again after a move, initialize a new search from the new position.
+ *
+ * @todo Multithreading: the library starts no threads. Parallel playouts and
+ * root parallelization of the search are still to be implemented.
  */
 #ifndef HEXRECLAIM_MCTS_H
 #define HEXRECLAIM_MCTS_H

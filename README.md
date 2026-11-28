@@ -130,7 +130,7 @@ int main(void)
 - **Time limits.** `hr_mcts_run` may be called repeatedly: run small batches and check the clock in between.
 - **Proven results.** `hr_mcts_proven` returns the winner with best play once it is known, and the search then stops. The `proven` field of `hr_mcts_move` says the same about a single move.
 - **All moves.** `hr_mcts_moves` reports visits and wins of every distinct move of the searched position.
-- **Threads.** One search runs on one thread. To use several, give each thread its own search, node array, table and seed, then add up the visits of each action, preferring any move that some search has proven to win.
+- **Threads.** One search runs on one thread. To use several, give each thread its own search, node array, table and seed, then add up the visits of each action, preferring any move that some search has proven to win. The library does not do this for you yet, see [TODO](#todo).
 - **After a move.** Initialize a new search from the new position; trees are not reused.
 - **Tuning.** The field `exploration` (default `HR_MCTS_EXPLORATION`, 0.35) may be changed after initialization.
 
@@ -207,3 +207,11 @@ Separate `hr_game` and `hr_pos` objects are independent of each other, and any n
 - `tests/test_hexreclaim.c` contains test cases for each rule, plus differential testing over 4152 random games with radius 1–8: every move is compared against a separately written naive model, and after each game ends, replay and step-by-step undo are checked.
 - `tests/test_sim.c` tests the simulation layer: the cell sets stay consistent, actions lead to exactly the positions the legal moves lead to, sampled moves follow the documented distribution, playouts agree with move-by-move play in both stopping modes, and the position hash spreads well and separates the positions of many random games.
 - `tests/test_mcts.c` tests the tree search: visit counts, win counts and proofs are consistent throughout the tree; proven results agree with an exhaustive solver on the radius-1 board and on radius-2 endgames; with a transposition table only equal positions share children; searches are reproducible; and the search beats random play.
+
+## TODO
+
+- **Multithreading.** The library starts no threads, and using it from several threads has not been tested. Still to be implemented:
+  - random playouts spread over threads;
+  - root parallelization of the tree search: independent searches whose root statistics are added up.
+
+  Sharing one tree between threads (tree parallelization) is a further option. It needs atomic operations, which C99 does not provide.
