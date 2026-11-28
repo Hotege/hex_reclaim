@@ -92,7 +92,7 @@ Without a game, set up the two objects directly with `hr_board_init` and `hr_pos
 
 ## Tree search
 
-`hexreclaim_mcts.h` provides a Monte Carlo tree search: UCT with uniformly random playouts. A position whose winner is certain is marked as proven, and proofs are propagated towards the root (MCTS-Solver), so small boards and endgames can be solved exactly.
+`hexreclaim_mcts.h` provides a Monte Carlo tree search: UCT with uniformly random playouts. A position whose winner is certain is marked as proven, and proofs are propagated towards the root (MCTS-Solver), so small boards and endgames can be solved exactly. [RESULTS.md](RESULTS.md) records what has been found out about the game so far.
 
 ```c
 #include <stdio.h>
