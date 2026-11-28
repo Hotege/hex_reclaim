@@ -1,15 +1,28 @@
 /**
  * @file play.c
- * @brief Example: a two-player game on the command line.
+ * @brief Example: a game on the command line, against a person or the computer.
  *
  * Usage: `play [n] [m]`, where `n` is the board radius and `m` the number of
  * pieces per player. The defaults are 2 and 3.
+ *
+ * Both players enter their moves, or ask the computer to move for them with the
+ * command `a`, which runs a Monte Carlo tree search.
  */
-#include "hexreclaim.h"
+#include "hexreclaim_mcts.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+/** @brief Nodes of the computer's search tree (64 MiB). */
+#define SEARCH_NODES (1u << 22)
+
+/** @brief Iterations of a computer move if the command names no number. */
+#define DEFAULT_ITERATIONS 100000
+
+/** @brief Largest number of iterations accepted on input. */
+#define MAX_ITERATIONS 1000000000L
 
 /** @brief Direction names accepted on input, indexed by ::hr_dir. */
 static const char *const DIR_NAMES[HR_DIR_COUNT] = {"e",  "ne", "nw",
@@ -122,6 +135,72 @@ static int parse_move(const char *line, hr_move *out)
 }
 
 /**
+ * @brief Parses a line holding a computer-move command.
+ *
+ * @param line The input line.
+ * @param[out] iterations Receives the number of iterations to search.
+ * @return 1 on success, 0 if the line is malformed.
+ */
+static int parse_search(const char *line, uint32_t *iterations)
+{
+    long count;
+    char extra;
+    int end = 0;
+
+    sscanf(line, " a %n", &end);
+    if (end > 0 && line[end] == '\0') {
+        *iterations = DEFAULT_ITERATIONS;
+        return 1;
+    }
+    if (sscanf(line, " a %ld %c", &count, &extra) == 1 && count >= 1 &&
+        count <= MAX_ITERATIONS) {
+        *iterations = (uint32_t)count;
+        return 1;
+    }
+    return 0;
+}
+
+/**
+ * @brief Searches for a move and plays it for the player to move.
+ *
+ * @param g          The game.
+ * @param iterations Number of search iterations.
+ * @param rng        Source of the seeds of the searches.
+ * @return ::HR_OK, or ::HR_ERR_GAME_OVER if the game has ended.
+ */
+static hr_status computer_move(hr_game *g, uint32_t iterations, hr_rng *rng)
+{
+    static hr_mcts_node nodes[SEARCH_NODES];
+    static hr_mcts search;
+    const hr_board *board = hr_game_board(g);
+    const hr_pos *pos = hr_game_position(g);
+    int mover = (int)hr_to_move(g);
+    hr_player decided = hr_pos_decided(pos);
+
+    hr_status status = hr_mcts_init(&search, board, pos, nodes, SEARCH_NODES,
+                                    hr_rng_next(rng));
+    if (status != HR_OK)
+        return status;
+    hr_mcts_run(&search, iterations);
+    hr_mcts_move best = hr_mcts_best(&search);
+
+    printf("P%d plays: ", mover);
+    print_move(hr_action_decode(board, best.action));
+    if (decided != HR_NOBODY)
+        printf("  (P%d already holds more than half of the cells)\n",
+               (int)decided);
+    else if (hr_mcts_proven(&search) != HR_NOBODY)
+        printf("  (proven: P%d wins with best play; %u iterations)\n",
+               (int)hr_mcts_proven(&search),
+               (unsigned)hr_mcts_iterations(&search));
+    else
+        printf("  (win rate of P%d %.1f%%, from %u of %u iterations)\n",
+               mover, 100.0 * best.wins / best.visits, (unsigned)best.visits,
+               (unsigned)hr_mcts_iterations(&search));
+    return hr_apply(g, hr_action_decode(board, best.action));
+}
+
+/**
  * @brief Runs the interactive game loop.
  *
  * @param argc Number of command-line arguments.
@@ -134,14 +213,17 @@ int main(int argc, char **argv)
     int n = argc > 1 ? atoi(argv[1]) : 2;
     int m = argc > 2 ? atoi(argv[2]) : 3;
     char line[128];
+    hr_rng rng;
 
     if (hr_init(&game, n, m) != HR_OK) {
         fprintf(stderr, "Usage: %s [radius 1..%d] [pieces 1..%d]\n", argv[0],
                 HR_MAX_RADIUS, HR_MAX_PIECES);
         return 1;
     }
+    hr_rng_seed(&rng, (uint64_t)time(NULL));
     puts("Commands: p q r (place), s q r dir (sweep; dir: e ne nw w sw se),\n"
-         "          u (undo), l (legal moves), x (quit)");
+         "          a [iterations] (computer moves), u (undo),\n"
+         "          l (legal moves), x (quit)");
 
     for (;;) {
         print_state(&game);
@@ -157,6 +239,7 @@ int main(int argc, char **argv)
 
         char cmd = '\0';
         hr_move move;
+        uint32_t iterations;
         hr_status status = HR_OK;
         sscanf(line, " %c", &cmd);
 
@@ -168,6 +251,8 @@ int main(int argc, char **argv)
             print_legal(&game);
         } else if (parse_move(line, &move)) {
             status = hr_apply(&game, move);
+        } else if (parse_search(line, &iterations)) {
+            status = computer_move(&game, iterations, &rng);
         } else {
             puts("Unrecognized command");
         }

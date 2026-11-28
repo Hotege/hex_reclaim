@@ -1,17 +1,17 @@
 # hexreclaim
 
-A C99 library that maintains the state of hex_reclaim games and simulates them. It depends only on the standard library, performs no dynamic memory allocation, has no mutable global state and does no I/O.
+A C99 library that maintains the state of hex_reclaim games, simulates them and searches for moves. It depends only on the standard library (the tree search also needs the math library, `-lm`), performs no dynamic memory allocation, has no mutable global state and does no I/O.
 
 ## Building
 
 ```sh
 make            # build/libhexreclaim.a, the example programs and the test programs
 make test       # run the tests
-./build/play 2 3         # command-line game: radius 2, 3 pieces per player
+./build/play 2 3         # command-line game: radius 2, 3 pieces per player; "a" = computer moves
 ./build/mc 2 3 20000     # Monte Carlo ranking of the first moves, with playout speed
 ```
 
-You can also drop `include/hexreclaim.h` and `src/hexreclaim.c` straight into your own project.
+You can also drop `include/hexreclaim.h` and `src/hexreclaim.c` straight into your own project. For the tree search, add `include/hexreclaim_mcts.h` and `src/hexreclaim_mcts.c`, and link with `-lm`.
 
 ## Two layers
 
@@ -90,6 +90,46 @@ Without a game, set up the two objects directly with `hr_board_init` and `hr_pos
 - **Custom policies.** Callers may read the fields of `hr_board` and `hr_pos` (`neighbor`, the cell sets, the counters) together with `hr_set_has` and `hr_pos_ray_length`.
 - **No undo.** Keep a copy of the position instead.
 
+## Tree search
+
+`hexreclaim_mcts.h` provides a Monte Carlo tree search: UCT with uniformly random playouts. A position whose winner is certain is marked as proven, and proofs are propagated towards the root (MCTS-Solver), so small boards and endgames can be solved exactly.
+
+```c
+#include <stdio.h>
+#include "hexreclaim_mcts.h"
+
+#define NODES (1u << 20)                       /* 16 MiB */
+
+int main(void)
+{
+    static hr_mcts_node nodes[NODES];          /* the tree, owned by the caller */
+    static hr_mcts search;
+    hr_game g;
+    if (hr_init(&g, 3, 3) != HR_OK)
+        return 1;
+
+    const hr_board *board = hr_game_board(&g);
+    if (hr_mcts_init(&search, board, hr_game_position(&g), nodes, NODES,
+                     1 /* seed */) != HR_OK)
+        return 1;
+    hr_mcts_run(&search, 20000);               /* iterations */
+
+    hr_mcts_move best = hr_mcts_best(&search);
+    printf("win rate %.2f over %u visits\n",
+           (double)best.wins / best.visits, (unsigned)best.visits);
+    hr_apply(&g, hr_action_decode(board, best.action));
+    return 0;
+}
+```
+
+- **Memory.** The tree lives in the node array given to `hr_mcts_init`, 16 bytes per node. Expanding a node adds one child per distinct action; searching from the start of a game with radius 2 to 5 takes about 3 to 15 nodes per iteration. When the array is full, the search goes on without growing the tree. `HR_MCTS_MIN_NODES` is large enough for any position, but a useful search wants far more.
+- **Time limits.** `hr_mcts_run` may be called repeatedly: run small batches and check the clock in between.
+- **Proven results.** `hr_mcts_proven` returns the winner with best play once it is known, and the search then stops. The `proven` field of `hr_mcts_move` says the same about a single move.
+- **All moves.** `hr_mcts_moves` reports visits and wins of every distinct move of the searched position.
+- **Threads.** One search runs on one thread. To use several, give each thread its own search, node array and seed, then add up the visits of each action, preferring any move that some search has proven to win.
+- **After a move.** Initialize a new search from the new position; trees are not reused.
+- **Tuning.** The field `exploration` (default `HR_MCTS_EXPLORATION`, 0.35) may be changed after initialization.
+
 ## Coordinates and directions
 
 Cells use axial coordinates `(q, r)`, with the center at `(0, 0)`. Cells on the board satisfy `|q|, |r|, |q+r| <= n`.
@@ -130,9 +170,10 @@ for (int r = -n; r <= n; r++)
 | Actions | `hr_action_place` `hr_action_sweep` `hr_action_cell` `hr_action_type` `hr_action_dir` `hr_action_encode` `hr_action_decode` |
 | Simulation | `hr_pos_apply` `hr_pos_actions` `hr_pos_random_action` `hr_pos_playout` |
 | Random numbers | `hr_rng_seed` `hr_rng_next` `hr_rng_below` |
+| Tree search | `hr_mcts_init` `hr_mcts_run` `hr_mcts_best` `hr_mcts_moves` `hr_mcts_iterations` `hr_mcts_proven` |
 | Errors | `hr_status_str` |
 
-See the comments in `include/hexreclaim.h` for the detailed contracts.
+See the comments in the headers under `include/` for the detailed contracts.
 
 ## Implementation conventions
 
@@ -149,9 +190,10 @@ The rules follow the design document (2026-11-26 version). The following are cho
 
 ## Thread safety
 
-Separate `hr_game` and `hr_pos` objects are independent of each other, and any number of threads may share one `hr_board`. Give each thread its own positions and its own `hr_rng` with its own seed. If multiple threads modify the same object, you must do your own locking.
+Separate `hr_game` and `hr_pos` objects are independent of each other, and any number of threads may share one `hr_board`. Give each thread its own positions and its own `hr_rng` with its own seed, and each search its own node array. If multiple threads modify the same object, you must do your own locking.
 
 ## Tests
 
 - `tests/test_hexreclaim.c` contains test cases for each rule, plus differential testing over 4152 random games with radius 1–8: every move is compared against a separately written naive model, and after each game ends, replay and step-by-step undo are checked.
 - `tests/test_sim.c` tests the simulation layer: the cell sets stay consistent, actions lead to exactly the positions the legal moves lead to, sampled moves follow the documented distribution, and playouts agree with move-by-move play in both stopping modes.
+- `tests/test_mcts.c` tests the tree search: visit counts, win counts and proofs are consistent throughout the tree; proven results agree with an exhaustive solver on the radius-1 board and on radius-2 endgames; searches are reproducible; and the search beats random play.
